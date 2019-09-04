@@ -66,7 +66,8 @@ B  = Constant((0.0, 0.0))        # Body force per unit volume
 T0 =  Constant((0.0, 0.0))       # Traction force on the "line" part of the semi-circle - should be set zero because of Dirichlet boundary condition on the same part of the boundary  
 T1 =  Constant((0.0, 0.0))       # Traction force on the rest of the semi-circle (except "line" part and contact part) 
 
-nM = Constant((0.0, -1.0)) # Normal to the rigid surface  
+n = FacetNormal (mesh) # Normal to mesh faces
+nM = Constant((0.0, 1.0)) # Normal to the rigid surface  
 
 penetration = 2.00 # semi-circle moves perpendicularly towards the rigid surface a distance of "penetration" in [mm]      
 penalty = Constant(1e9) # penalty parameter - !!!is divided by 2 in the total potential energy functional!!!                 
@@ -103,17 +104,17 @@ def sigma(u): # Definition of Cauchy stress tensor
 def maculay(x): # Definition of Maculay bracket
     return (x+abs(x))/2
 def traction(x): # Definition of traction force on the surface of the linear elastic body
-    return dot(nM,sigma(x))
+    return dot(n,sigma(x))
 def pM(x): # Definition of contact pressure
     return dot(nM,traction(x))
-def gap(): # Definition of gap function
+def gap(u): # Definition of gap function
     return sphere+u[1]
 
 # Stored strain energy density (linear elasticity model)
 psi = inner(sigma(u), epsilon(u))
 
 # Total potential energy
-Pi = psi*dx - dot(B, u)*dx - dot(T0, u)*ds(0) - dot(T1, u)*ds(1) - dot(pM(u),gap())*ds(2) + (penalty/2.0)*dot(maculay(-gap()),maculay(-gap()))*ds(2)
+Pi = psi*dx - dot(B, u)*dx - dot(T0, u)*ds(0) - dot(T1, u)*ds(1) - dot(pM(u),maculay(-gap(u)))*ds(2) + (penalty/2.0)*dot(maculay(-gap(u)),maculay(-gap(u)))*ds(2)
 
 # Compute first variation of Pi (directional derivative about u in the direction of v)
 F = derivative(Pi, u, v)
