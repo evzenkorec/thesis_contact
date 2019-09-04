@@ -70,7 +70,7 @@ n = FacetNormal (mesh) # Normal to mesh faces
 nM = Constant((0.0, 1.0)) # Normal to the rigid surface  
 
 penetration = 2.00 # semi-circle moves perpendicularly towards the rigid surface a distance of "penetration" in [mm]      
-penalty = Constant(1e9) # penalty parameter - !!!is divided by 2 in the total potential energy functional!!!                 
+penalty = Constant(1e6) # penalty parameter - !!!is divided by 2 in the total potential energy functional!!!                 
 sphere = Expression("(x[0]*x[0])/(2*R)", R=R, degree=2)  # Quadratic approximation of sphere for easier implementation
 
 tol = DOLFIN_EPS # FEniCS tolerance - necessary for "boundary_markers" and the correct definition of the boundaries 
@@ -104,7 +104,7 @@ def sigma(u): # Definition of Cauchy stress tensor
 def maculay(x): # Definition of Maculay bracket
     return (x+abs(x))/2
 def traction(x): # Definition of traction force on the surface of the linear elastic body
-    return dot(n,sigma(x))
+    return dot(nM,sigma(x))
 def pM(x): # Definition of contact pressure
     return dot(nM,traction(x))
 def gap(u): # Definition of gap function
@@ -186,7 +186,8 @@ plt.colorbar(graph4)
 plt.savefig("MAGdisplacementL-NITSCHE.pdf", format="pdf")
 
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution 
-p.assign(-project(sigma(u)[1, 1], V0))
+# p.assign(-project(sigma(u)[1, 1], V0))
+p.assign(-project(pM(u), V0))
 a = sqrt(R*penetration)
 F = pi/4*float(E)*d
 p0 = float(E)*d/(2*a)
