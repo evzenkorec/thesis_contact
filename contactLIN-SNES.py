@@ -26,47 +26,25 @@
 # Modified by ... 2019
 
 from dolfin import *
-from mshr import *
-import matplotlib
-matplotlib.get_backend()
-import matplotlib.pyplot as plt
+from create_mesh import *
 import numpy as np
-
-# This demo requires PETSc
-if not has_petsc():
-    print("DOLFIN must be compiled with PETSc to run this demo.")
-    exit(0)
-
-# Form compiler options
-parameters["form_compiler"]["optimize"]     = True
-parameters["form_compiler"]["cpp_optimize"] = True
-# tell the form to apply optimization strategies in the code generation
-# phase and the use compiler optimization flags when compiling the
-# generated C++ code. Using the option ``["optimize"] = True`` will
-# generally result in faster code (sometimes orders of magnitude faster
-# for certain operations, depending on the equation), but it may take
-# considerably longer to generate the code and the generation phase may
-# use considerably more memory).
-
-# Define mesh geometry using "mshr"
-R = 50 # Radius of the semi-circle in [mm] - can be changed
-rect_help = Rectangle(Point(-R, 2*R), Point(R, R))
-circle = Circle(Point(0.0, R), R)
-half_circle = circle - rect_help
-
-# Create mesh
-mesh_half_circle = generate_mesh(half_circle, 40)
-mesh = mesh_half_circle
+import matplotlib
+import matplotlib.pyplot as plt
+R = 50
+mesh = generate_half_circle(50, res=1)
+from dolfin.io import XDMFFile
+xdmf_file = XDMFFile(mesh.mpi_comm(), "mesh.xdmf")
+xdmf_file.write(mesh)
+xdmf_file.close()
+exit(1)
 
 # Function spaces
 V = VectorFunctionSpace(mesh, "Lagrange", 1) # Define function space of the problem - piece-wise linear functions
-V0 = FunctionSpace(mesh, "DG", 0) # Define function space for post-processing of stress
 
 # Define functions
 du = TrialFunction(V)            # Incremental displacement for Jacobi matrix of iterative "newton_solver"
-v  = TestFunction(V)             # Test function
-u  = Function(V)                 # Trial function
-p = Function(V0, name="Contact pressure") # Contact pressure - for post-processing
+u, v  = Function(V), TestFunction(V)             # Trial and test function
+
 d = u.geometric_dimension()      # Space dimension of u (2 in our case)
 B  = Constant((0.0, 0.0))        # Body force per unit volume
 T0 =  Constant((0.0, 0.0))       # Traction force on the "line" part of the semi-circle - should be set zero because of Dirichlet boundary condition on the same part of the boundary  
@@ -99,7 +77,7 @@ mu = E/2/(1+nu) # Elastic parameter mu
 lmbda = E*nu/(1+nu)/(1-2*nu) # Elastic parameter lambda
 
 def epsilon(u): # Definition of deformation tensor
-    return 0.5*(nabla_grad(u) + nabla_grad(u).T)
+    return sym(grad(u))#0.5*(nabla_grad(u) + nabla_grad(u).T)
 def sigma(u): # Definition of Cauchy stress tensor
     return lmbda*tr(epsilon(u))*Identity(d) + 2.0*mu*epsilon(u)
 def maculay(x): # Definition of Maculay bracket
@@ -156,6 +134,7 @@ file << u
 #von Mises stresses
 s = sigma(u) - (1./3)*tr(sigma(u))*Identity(d) # deviatoric stress
 von_Mises = sqrt(3./2*inner(s, s))
+
 V = FunctionSpace(mesh, 'Lagrange', 1)
 von_Mises = project(von_Mises, V)
 
@@ -197,7 +176,9 @@ graph4 = plot(u_magnitude, title='Displacement magnitude [mm]')
 plt.colorbar(graph4)
 plt.savefig("MAGdisplacementL-SNES.pdf", format="pdf")
 
-# Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution 
+# Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
+V0 = FunctionSpace(mesh, "DG", 0) # Define function space for post-processing of stress
+p = Function(V0, name="Contact pressure") # Contact pressure - for post-processing
 p.assign(-project(sigma(u)[1, 1], V0))
 a = sqrt(R*penetration)
 F = pi/4*float(E)*d
