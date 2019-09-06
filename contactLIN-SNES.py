@@ -31,7 +31,7 @@ import matplotlib
 matplotlib.get_backend()
 import matplotlib.pyplot as plt
 import numpy as np
-# this is just a test
+
 # This demo requires PETSc
 if not has_petsc():
     print("DOLFIN must be compiled with PETSc to run this demo.")
