@@ -36,38 +36,60 @@ from dolfin.io import XDMFFile
 xdmf_file = XDMFFile(mesh.mpi_comm(), "mesh.xdmf")
 xdmf_file.write(mesh)
 xdmf_file.close()
-exit(1)
+
 
 # Function spaces
-V = VectorFunctionSpace(mesh, "Lagrange", 1) # Define function space of the problem - piece-wise linear functions
+V = VectorFunctionSpace(mesh, ("Lagrange", 1)) # Define function space of the problem - piece-wise linear functions
 
 # Define functions
 du = TrialFunction(V)            # Incremental displacement for Jacobi matrix of iterative "newton_solver"
 u, v  = Function(V), TestFunction(V)             # Trial and test function
 
 d = u.geometric_dimension()      # Space dimension of u (2 in our case)
-B  = Constant((0.0, 0.0))        # Body force per unit volume
-T0 =  Constant((0.0, 0.0))       # Traction force on the "line" part of the semi-circle - should be set zero because of Dirichlet boundary condition on the same part of the boundary  
-T1 =  Constant((0.0, 0.0))       # Traction force on the rest of the semi-circle (except "line" part and contact part) 
+B  = Constant(mesh, [0.0, 0.0])        # Body force per unit volume
+T0 =  Constant(mesh, [0.0, 0.0])       # Traction force on the "line" part of the semi-circle - should be set zero because of Dirichlet boundary condition on the same part of the boundary  
+T1 =  Constant(mesh, [0.0, 0.0])       # Traction force on the rest of the semi-circle (except "line" part and contact part) 
 
 penetration = 2.00 # semi-circle moves perpendicularly towards the rigid surface a distance of "penetration" in [mm]      
 
-tol = DOLFIN_EPS # FEniCS tolerance - necessary for "boundary_markers" and the correct definition of the boundaries 
+tol = 1e-14 # FEniCS tolerance - necessary for "boundary_markers" and the correct definition of the boundaries 
 
-boundary_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1) # Definition of "boundary_markers" 
+boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0) # Definition of "boundary_markers"
 
-boundary_D = CompiledSubDomain('on_boundary && near(x[1], R, tol)', R = R, tol=tol) # Definition of Dirichlet type boundary - the line part of the semi-circle
-bc = DirichletBC(V, Constant((0.0,-penetration)), boundary_D) # Setting the Dirichlet type boundary condition
+# Definition of Dirichlet type boundary - the line part of the semi-circle
+def boundary_D(x, only_boundary):
+    return x[:,0] > R -tol
+#boundary_D = CompiledSubDomain('on_boundary && near(x[1], R, tol)',
+#                               R=R, tol=tol)
 
-bn0 = CompiledSubDomain('on_boundary && near(x[1], R, tol)', R = R, tol=tol) # Boundary with traction force T0 - see the description of T0
-bn0.mark(boundary_markers, 0) 
 
-bn1 = CompiledSubDomain('on_boundary && x[1] < R - tol && x[1] > penetration + tol', R = R, penetration = penetration, tol=tol) # Boundary with traction force T1 - see the description of T1
-bn1.mark(boundary_markers, 1)
+# Boundary with traction force T1 - see the description of T1
+#bn1 = CompiledSubDomain('on_boundary && x[1] < R - tol && x[1] > penetration + tol', R = R, penetration = penetration, tol=tol)
+def bn1(x):
+    return np.logical_and(x[:,1] < R-tol,x[:,1] > penetration + tol)
 
-bC1 = CompiledSubDomain('on_boundary && x[1] < penetration - tol', tol=tol, penetration = penetration) # Contact search - contact part of the boundary
-bC1.mark(boundary_markers, 2)
+boundary_markers.mark(bn1, 1)
+ # Contact search - contact part of the boundary
+def bC1(x):
+    return x[:,1] < penetration - tol
+# bC1 = CompiledSubDomain('on_boundary && x[1] < penetration - tol', tol=tol, penetration = penetration)
 
+boundary_markers.mark(bC1, 2)
+XDMFFile(mesh.mpi_comm(),"mf.xdmf").write(boundary_markers)
+
+def project(value, V):
+    from ufl import inner, dx
+    u, v = TrialFunction(V), TestFunction(V)
+    lhs = inner(u,v)*dx
+    rhs = inner(value, v)*dx
+    uh = Function(V)
+    solve(lhs==rhs, uh)
+    return uh
+
+dirichlet_value = project(Constant(mesh, (0.0,-penetration)),V)
+
+bc = DirichletBC(V, dirichlet_value , boundary_D)
+exit(1)
 ds = Measure('ds', domain=mesh, subdomain_data=boundary_markers)
 
 # Elasticity parameters
