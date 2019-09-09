@@ -20,6 +20,10 @@ def generate_half_circle(R, res=1):
     points, cells = gmesh.points, gmesh.cells
     
     from dolfin import Mesh, MPI, cpp
+    from dolfin.fem import create_coordinate_map
     from dolfin.cpp.mesh import CellType
     mesh = Mesh(MPI.comm_world, CellType.triangle, gmesh.points, gmesh.cells["triangle"],  [], cpp.mesh.GhostMode.none)
+    # Fix for saving functions to file
+    cmap = create_coordinate_map(mesh.ufl_domain())
+    mesh.geometry.coord_mapping = cmap
     return mesh

@@ -6,97 +6,73 @@
  type boundary  condition on the "line" part of the semi-circle, which moves 
  perpendicularly towards the rigid surface a distance of "penetration"."""
 
-# Copyright (C) 2019 ...
-#
-# This file is part of DOLFIN.
-# 
-# DOLFIN is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# DOLFIN is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License 
-# along with DOLFIN. If not, see <http://www.gnu.org/licenses/>.
-#
-# Modified by ... 2019
-
 from dolfin import *
 from create_mesh import *
+from petsc4py import PETSc
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
+
+
+# Generate mesh 
 R = 50
 mesh = generate_half_circle(50, res=1)
-from dolfin.io import XDMFFile
-xdmf_file = XDMFFile(mesh.mpi_comm(), "mesh.xdmf")
-xdmf_file.write(mesh)
-xdmf_file.close()
 
-
-# Function spaces
-V = VectorFunctionSpace(mesh, ("Lagrange", 1)) # Define function space of the problem - piece-wise linear functions
-
-# Define functions
-du = TrialFunction(V)            # Incremental displacement for Jacobi matrix of iterative "newton_solver"
+# Define function space and relevant functions
+V = VectorFunctionSpace(mesh, ("Lagrange", 1))
 u, v  = Function(V), TestFunction(V)             # Trial and test function
 
-d = u.geometric_dimension()      # Space dimension of u (2 in our case)
+d = u.geometric_dimension()            # Space dimension of u (2 in our case)
 B  = Constant(mesh, [0.0, 0.0])        # Body force per unit volume
-T0 =  Constant(mesh, [0.0, 0.0])       # Traction force on the "line" part of the semi-circle - should be set zero because of Dirichlet boundary condition on the same part of the boundary  
-T1 =  Constant(mesh, [0.0, 0.0])       # Traction force on the rest of the semi-circle (except "line" part and contact part) 
+T0 =  Constant(mesh, [0.0, 0.0])       # Traction force on the "line" part of the semi-circle
+T1 =  Constant(mesh, [0.0, 0.0])       # Traction force on the rest of the semi-circle
 
-penetration = 2.00 # semi-circle moves perpendicularly towards the rigid surface a distance of "penetration" in [mm]      
+# Displacement of top of semi-circle towards the rigid surface [mm]
+penetration = 2.00    
 
-tol = 1e-14 # FEniCS tolerance - necessary for "boundary_markers" and the correct definition of the boundaries 
+# FEniCS tolerance
+tol = 1e-14 
 
-boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0) # Definition of "boundary_markers"
+# Definition for marking boundaries
+boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0) 
 
 # Definition of Dirichlet type boundary - the line part of the semi-circle
 def boundary_D(x, only_boundary):
-    return x[:,0] > R -tol
-#boundary_D = CompiledSubDomain('on_boundary && near(x[1], R, tol)',
-#                               R=R, tol=tol)
-
+    return x[:, 1] > R - tol
 
 # Boundary with traction force T1 - see the description of T1
-#bn1 = CompiledSubDomain('on_boundary && x[1] < R - tol && x[1] > penetration + tol', R = R, penetration = penetration, tol=tol)
 def bn1(x):
     return np.logical_and(x[:,1] < R-tol,x[:,1] > penetration + tol)
-
 boundary_markers.mark(bn1, 1)
- # Contact search - contact part of the boundary
+
+# Contact search - contact part of the boundary
 def bC1(x):
     return x[:,1] < penetration - tol
-# bC1 = CompiledSubDomain('on_boundary && x[1] < penetration - tol', tol=tol, penetration = penetration)
-
 boundary_markers.mark(bC1, 2)
-XDMFFile(mesh.mpi_comm(),"mf.xdmf").write(boundary_markers)
 
+
+from ufl import derivative, dot, dx, grad, Identity, inner, Measure, sym, tr
 def project(value, V):
-    from ufl import inner, dx
+    """
+    Simple implementation of project, needed due to issue 507
+    https://github.com/FEniCS/dolfinx/issues/507
+    and useful in post-processing.
+    """
     u, v = TrialFunction(V), TestFunction(V)
-    lhs = inner(u,v)*dx
+    lhs = inner(u, v)*dx
     rhs = inner(value, v)*dx
     uh = Function(V)
     solve(lhs==rhs, uh)
     return uh
 
+# Create Dirichlet-condition for penetration
 dirichlet_value = project(Constant(mesh, (0.0,-penetration)),V)
-
 bc = DirichletBC(V, dirichlet_value , boundary_D)
-exit(1)
-ds = Measure('ds', domain=mesh, subdomain_data=boundary_markers)
+
 
 # Elasticity parameters
-E = Constant(200000.) # Young's modulus [MPa]
-nu = Constant(0.3) # Poisson ratio [-]
-mu = E/2/(1+nu) # Elastic parameter mu
-lmbda = E*nu/(1+nu)/(1-2*nu) # Elastic parameter lambda
+E = Constant(mesh,200000.)   # Young's modulus [MPa]
+nu = Constant(mesh, 0.3)     # Poisson ratio [-]
+mu = E/(2*(1+nu))              # Elastic parameter mu
+lmbda = E*nu/((1+nu)*(1-2*nu)) # Elastic parameter lambda
 
 def epsilon(u): # Definition of deformation tensor
     return sym(grad(u))#0.5*(nabla_grad(u) + nabla_grad(u).T)
@@ -105,118 +81,115 @@ def sigma(u): # Definition of Cauchy stress tensor
 def maculay(x): # Definition of Maculay bracket
     return (x+abs(x))/2
 
-# Stored strain energy density (linear elasticity model)
-psi = inner(sigma(u), epsilon(u))
+
 
 # Total potential energy
+ds = Measure('ds', domain=mesh, subdomain_data=boundary_markers)
+psi = inner(sigma(u), epsilon(u)) # Stored strain energy density (linear elasticity model)
 Pi = psi*dx - dot(B, u)*dx - dot(T0, u)*ds(0) - dot(T1, u)*ds(1)
 
 # Compute first variation of Pi (directional derivative about u in the direction of v)
 F = derivative(Pi, u, v)
 
-# Compute Jacobian of F for iterative "newton_solver"
-J = derivative(F, u, du)
 
 # The displacement u must be such that the current configuration x+u
 # remains in the box [xmin = -inf,xmax = inf] x [ymin = 0,ymax = inf]
-constraint_u = Expression(("xmax - x[0]","ymax - x[1]"),
-                         xmax=np.infty,  ymax=np.infty, degree=1)
-constraint_l = Expression(("xmin - x[0]","ymin - x[1]"),
-                          xmin=-np.infty, ymin=0, degree=1)
-umin = interpolate(constraint_l, V)
-umax = interpolate(constraint_u, V)
+class bounds:
+    def __init__(self,x_lim, y_lim):
+        self.x_lim = x_lim
+        self.y_lim = y_lim
 
-# Define the solver parameters
-snes_solver_parameters = {"nonlinear_solver": "snes",
-                          "snes_solver": {"linear_solver": "lu",
-                                          "maximum_iterations": 30,
-                                          "report": True,
-                                          "error_on_nonconvergence": False}}
+    def eval(self, values, x):
+        values[:, 0] = self.x_lim - x[:,0]
+        values[:, 1] = self.y_lim - x[:,1]
+
+constraint_u = bounds(np.infty, np.infty)
+umax = interpolate(constraint_u.eval, V)
+constraint_l = bounds(-np.infty, 0)
+umin = interpolate(constraint_l.eval, V)
+
+
+class NonlinearPDE_SNESProblem():
+    def __init__(self, F, u, bc):
+        super().__init__()
+        V = u.function_space
+        du = function.TrialFunction(V)
+        self.L = F
+        self.a = derivative(F, u, du)
+        self.a_comp = dolfin.fem.Form(self.a)
+        self.bc = bc
+        self.u = u
+
+    def F(self, snes, x, F):
+        """Assemble residual vector."""
+        x.ghostUpdate(addv=PETSc.InsertMode.INSERT,
+                      mode=PETSc.ScatterMode.FORWARD)
+        x.copy(self.u.vector)
+        self.u.vector.ghostUpdate(addv=PETSc.InsertMode.INSERT,
+                                  mode=PETSc.ScatterMode.FORWARD)
+
+        with F.localForm() as f_local:
+            f_local.set(0.0)
+        fem.assemble_vector(F, self.L)
+        fem.apply_lifting(F, [self.a], [[self.bc]], [x], -1.0)
+        F.ghostUpdate(addv=PETSc.InsertMode.ADD,
+                      mode=PETSc.ScatterMode.REVERSE)
+        fem.set_bc(F, [self.bc], x, -1.0)
+
+    def J(self, snes, x, J, P):
+        """Assemble Jacobian matrix."""
+        J.zeroEntries()
+        fem.assemble_matrix(J, self.a, [self.bc])
+        J.assemble()
+
 
 # Set up the non-linear solver
-problem = NonlinearVariationalProblem(F, u, bc, J=J)
-problem.set_bounds(umin, umax)
-solver  = NonlinearVariationalSolver(problem)
-solver.parameters.update(snes_solver_parameters)
-info(solver.parameters, True)
+problem = NonlinearPDE_SNESProblem(F, u, bc)
 
-# Solve the problem
-(iter, converged) = solver.solve()
+#problem.set_bounds(umin, umax)
+b = dolfin.cpp.la.create_vector(V.dofmap.index_map)
+J = dolfin.cpp.fem.create_matrix(problem.a_comp._cpp_object)
 
-# Check for convergence
-if not converged:
-    warning("This demo is a complex nonlinear problem. Convergence is not guaranteed when modifying some parameters or using PETSC 3.2.")
+# Create Newton solver and solve
+snes = PETSc.SNES().create()
+snes.setFunction(problem.F, b)
+snes.setJacobian(problem.J, J)
+snes.setVariableBounds(umin.vector, umax.vector)
+snes.setType("vinewtonrsls")
+snes.setTolerances(rtol=1.0e-9, max_it=10)
+snes.setFromOptions()
+snes.getKSP().setTolerances(rtol=1.0e-9)
+snes.solve(None, u.vector)
+assert snes.getConvergedReason() > 0
 
 # Post-processing
-
-# Save solution in VTK format
-file = File("displacement.pvd")
-file << u
+from dolfin.io import XDMFFile
+with XDMFFile(mesh.mpi_comm(), "output/u.xdmf") as file:
+    file.write(u)
 
 #von Mises stresses
+from numpy import pi
+from ufl import sqrt as uflsqrt
 s = sigma(u) - (1./3)*tr(sigma(u))*Identity(d) # deviatoric stress
-von_Mises = sqrt(3./2*inner(s, s))
+von_Mises = uflsqrt(3./2*inner(s, s))
+V0 = FunctionSpace(mesh, ("DG", 0)) # Define function space for post-processing
+von_Mises = project(von_Mises, V0)
+with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
+    file.write(von_Mises)
 
-V = FunctionSpace(mesh, 'Lagrange', 1)
-von_Mises = project(von_Mises, V)
-
-#displacement
-# Compute magnitude of displacement
-u_magnitude = sqrt(dot(u, u))
-u_magnitude = project(u_magnitude, V)
-
-# Plot the deformed configuration 
-plt.figure()
-graph1 = plot(u, mode="displacement", wireframe=True, title="Displacement field - deformed configuration")
-matplotlib.rcParams['interactive'] == True
-plt.xlabel('$x$')
-plt.ylabel('$y$')
-plt.colorbar(graph1)
-plt.savefig("displacementL-SNES.pdf", format="pdf")
-
-# Plot mesh
-plt.figure()
-graph2 = plot(mesh, title="MeshL")
-plt.xlabel('$x$')
-plt.ylabel('$y$')
-plt.savefig("meshL-SNES.pdf", format="pdf")
-
-
-# Plot von Mises stress
-plt.figure()
-plt.xlabel('$x$')
-plt.ylabel('$y$')
-graph3 = plot(von_Mises, title='Von Mises stress [kPa]')
-plt.colorbar(graph3)
-plt.savefig("stressL-SNES.pdf", format="pdf")
-
-#Plot magnitude of displacement
-plt.figure()
-plt.xlabel('$x$')
-plt.ylabel('$y$')
-graph4 = plot(u_magnitude, title='Displacement magnitude [mm]')
-plt.colorbar(graph4)
-plt.savefig("MAGdisplacementL-SNES.pdf", format="pdf")
-
+from dolfin.fem import assemble_scalar
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
-V0 = FunctionSpace(mesh, "DG", 0) # Define function space for post-processing of stress
-p = Function(V0, name="Contact pressure") # Contact pressure - for post-processing
-p.assign(-project(sigma(u)[1, 1], V0))
+p = Function(V0) # Contact pressure - for post-processing
+
+p = project(-sigma(u)[1, 1], V0)
+from numpy import sqrt
 a = sqrt(R*penetration)
-F = pi/4*float(E)*d
-p0 = float(E)*d/(2*a)
-print("Maximum pressure FE: {0:8.5f} kPa Hertz: {1:8.5f} kPa".format(1e-3*max(np.abs(p.vector().get_local())), 1e-3*p0))
-print("Applied force    FE: {0:8.5f} kN Hertz: {1:8.5f} kN".format(1e-3*assemble(p*ds(2)), 1e-3*F))
+F = pi/4*E.value*d
 
-#print max and min for magnitude of displacement
-print('min/max u [mm]:',
-u_magnitude.vector().get_local().min(),
-u_magnitude.vector().get_local().max())
+p0 = E.value*d/(2*a)
 
-#print max and min for von Mises stress
-print('min/max von Mises stress [kPa]:',
-1e-3*von_Mises.vector().get_local().min(),
-1e-3*von_Mises.vector().get_local().max())
+print("Maximum pressure FE: {0:8.5f} kPa Hertz: {1:8.5f} kPa".format(1e-3*max(np.abs(p.vector.array)), 1e-3*p0))
+print("Applied force    FE: {0:8.5f} kN Hertz: {1:8.5f} kN".format(1e-3*assemble_scalar(p*ds(2)), 1e-3*F))
 
 
 
