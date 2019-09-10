@@ -97,8 +97,6 @@ def epsilon(u): # Definition of deformation tensor
     return sym(grad(u))#0.5*(nabla_grad(u) + nabla_grad(u).T)
 def sigma(u): # Definition of Cauchy stress tensor
     return lmbda*tr(epsilon(u))*Identity(d) + 2.0*mu*epsilon(u)
-def maculay(x): # Definition of Maculay bracket
-    return (x+abs(x))/2
 
 
 
@@ -190,7 +188,7 @@ print(snes.getConvergedReason())
 assert snes.getConvergedReason() > 0
 
 # Post-processing
-with XDMFFile(mesh.mpi_comm(), "output/u.xdmf") as file:
+with XDMFFile(mesh.mpi_comm(), "snes/u.xdmf") as file:
     file.write(u)
 
 #von Mises stresses
@@ -198,7 +196,7 @@ s = sigma(u) - (1./3)*tr(sigma(u))*Identity(d) # deviatoric stress
 von_Mises = sqrt(3./2*inner(s, s))
 V0 = FunctionSpace(mesh, ("DG", degree-1)) # Define function space for post-processing
 von_Mises = project(von_Mises, V0)
-with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
+with XDMFFile(mesh.mpi_comm(), "snes/von_mises.xdmf") as file:
     file.write(von_Mises)
 
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
@@ -209,9 +207,9 @@ F_p = assemble_scalar(p*ds(2))
 if d == 2:
     F_p *= L
     
-with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
+with XDMFFile(mesh.mpi_comm(), "snes/von_mises.xdmf") as file:
     file.write(von_Mises)
-with XDMFFile(mesh.mpi_comm(), "output/p.xdmf") as file:
+with XDMFFile(mesh.mpi_comm(), "snes/p.xdmf") as file:
     file.write(p)
 
 
