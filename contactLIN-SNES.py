@@ -7,14 +7,26 @@
  perpendicularly towards the rigid surface a distance of "penetration"."""
 
 from dolfin import *
-from create_mesh import *
-from petsc4py import PETSc
 import numpy as np
+
+# To generate mesh
+from create_mesh import *
+# UFL imports
+from ufl import (derivative, dot, dx, grad, Identity, inner, Measure, sym, tr, sqrt)
+
+# IO imports
+from dolfin.io import XDMFFile
+# Logging imports
+from dolfin.log import set_log_level, LogLevel
+# FEM imports
+from dolfin.fem import (assemble_matrix, assemble_scalar, assemble_vector,
+                        apply_lifting, Form, set_bc)
+from petsc4py import PETSc
 
 
 # Generate mesh 
-R = 50
-mesh = generate_half_circle(50, res=1)
+R = 1
+mesh = generate_half_circle(R, res=0.01)
 
 # Define function space and relevant functions
 V = VectorFunctionSpace(mesh, ("Lagrange", 1))
@@ -26,7 +38,7 @@ T0 =  Constant(mesh, [0.0, 0.0])       # Traction force on the "line" part of th
 T1 =  Constant(mesh, [0.0, 0.0])       # Traction force on the rest of the semi-circle
 
 # Displacement of top of semi-circle towards the rigid surface [mm]
-penetration = 2.00    
+penetration = R/50
 
 # FEniCS tolerance
 tol = 1e-14 
@@ -49,7 +61,6 @@ def bC1(x):
 boundary_markers.mark(bC1, 2)
 
 
-from ufl import derivative, dot, dx, grad, Identity, inner, Measure, sym, tr
 def project(value, V):
     """
     Simple implementation of project, needed due to issue 507
@@ -94,29 +105,33 @@ F = derivative(Pi, u, v)
 
 # The displacement u must be such that the current configuration x+u
 # remains in the box [xmin = -inf,xmax = inf] x [ymin = 0,ymax = inf]
-class bounds:
+class Bounds:
     def __init__(self,x_lim, y_lim):
         self.x_lim = x_lim
         self.y_lim = y_lim
 
     def eval(self, values, x):
-        values[:, 0] = self.x_lim - x[:,0]
-        values[:, 1] = self.y_lim - x[:,1]
+        values[:, 0] = self.x_lim - x[:, 0]
+        values[:, 1] = self.y_lim - x[:, 1]
 
-constraint_u = bounds(np.infty, np.infty)
+
+constraint_l = Bounds(-np.infty, 0)
+constraint_u = Bounds(np.infty, np.infty)
 umax = interpolate(constraint_u.eval, V)
-constraint_l = bounds(-np.infty, 0)
 umin = interpolate(constraint_l.eval, V)
 
 
 class NonlinearPDE_SNESProblem():
     def __init__(self, F, u, bc):
+        """
+        Nonlinear solver using SNES, lifted from unit tests
+        """
         super().__init__()
         V = u.function_space
-        du = function.TrialFunction(V)
+        du = TrialFunction(V)
         self.L = F
         self.a = derivative(F, u, du)
-        self.a_comp = dolfin.fem.Form(self.a)
+        self.a_comp = Form(self.a)
         self.bc = bc
         self.u = u
 
@@ -130,16 +145,16 @@ class NonlinearPDE_SNESProblem():
 
         with F.localForm() as f_local:
             f_local.set(0.0)
-        fem.assemble_vector(F, self.L)
-        fem.apply_lifting(F, [self.a], [[self.bc]], [x], -1.0)
+        assemble_vector(F, self.L)
+        apply_lifting(F, [self.a], [[self.bc]], [x], -1.0)
         F.ghostUpdate(addv=PETSc.InsertMode.ADD,
                       mode=PETSc.ScatterMode.REVERSE)
-        fem.set_bc(F, [self.bc], x, -1.0)
+        set_bc(F, [self.bc], x, -1.0)
 
     def J(self, snes, x, J, P):
         """Assemble Jacobian matrix."""
         J.zeroEntries()
-        fem.assemble_matrix(J, self.a, [self.bc])
+        assemble_matrix(J, self.a, [self.bc])
         J.assemble()
 
 
@@ -156,40 +171,40 @@ snes.setFunction(problem.F, b)
 snes.setJacobian(problem.J, J)
 snes.setVariableBounds(umin.vector, umax.vector)
 snes.setType("vinewtonrsls")
-snes.setTolerances(rtol=1.0e-9, max_it=10)
+snes.setTolerances(rtol=1.0e-7, max_it=25)
+
 snes.setFromOptions()
 snes.getKSP().setTolerances(rtol=1.0e-9)
 snes.solve(None, u.vector)
+print(snes.getConvergedReason())
 assert snes.getConvergedReason() > 0
 
 # Post-processing
-from dolfin.io import XDMFFile
 with XDMFFile(mesh.mpi_comm(), "output/u.xdmf") as file:
     file.write(u)
 
 #von Mises stresses
-from numpy import pi
-from ufl import sqrt as uflsqrt
 s = sigma(u) - (1./3)*tr(sigma(u))*Identity(d) # deviatoric stress
-von_Mises = uflsqrt(3./2*inner(s, s))
-V0 = FunctionSpace(mesh, ("DG", 0)) # Define function space for post-processing
+von_Mises = sqrt(3./2*inner(s, s))
+V0 = FunctionSpace(mesh, ("CG", 1)) # Define function space for post-processing
 von_Mises = project(von_Mises, V0)
 with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
     file.write(von_Mises)
 
-from dolfin.fem import assemble_scalar
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
-p = Function(V0) # Contact pressure - for post-processing
 
 p = project(-sigma(u)[1, 1], V0)
-from numpy import sqrt
-a = sqrt(R*penetration)
-F = pi/4*E.value*d
+a = np.sqrt(R*penetration)
+Es = E.value/(1-nu.value**2)
 
-p0 = E.value*d/(2*a)
+# NOTE: Should scale with L, what is L in our case?
+F = np.pi/4*Es*penetration
+p0 = Es*penetration/(2*a)
 
-print("Maximum pressure FE: {0:8.5f} kPa Hertz: {1:8.5f} kPa".format(1e-3*max(np.abs(p.vector.array)), 1e-3*p0))
-print("Applied force    FE: {0:8.5f} kN Hertz: {1:8.5f} kN".format(1e-3*assemble_scalar(p*ds(2)), 1e-3*F))
+
+
+print("Maximum pressure FE: {0:8.3e} kPa Hertz: {1:8.3e} kPa".format(1e-3*max(np.abs(p.vector.array)), 1e-3*p0))
+print("Applied force    FE: {0:8.3e} kN Hertz: {1:8.3e} kN".format(1e-3*assemble_scalar(p*ds(2)), 1e-3*F))
 
 
 
