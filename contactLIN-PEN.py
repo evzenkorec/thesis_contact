@@ -75,7 +75,7 @@ E = Constant(mesh, 200000.) # Young's modulus [MPa]
 nu = Constant(mesh,0.3) # Poisson ratio [-]
 mu = E/(2*(1+nu)) # Elastic parameter mu
 lmbda = E*nu*((1+nu)*(1-2*nu)) # Elastic parameter lambda
-penalty = E*Constant(mesh, 1e2) # penalty parameter  
+penalty = E*Constant(mesh, 1e3) # penalty parameter  
 
 def epsilon(u): # Definition of deformation tensor
     return 0.5*(nabla_grad(u) + nabla_grad(u).T)
@@ -86,7 +86,8 @@ def maculay(x): # Definition of Maculay bracket
 
 def gap(): # Definition of gap function
     x = SpatialCoordinate(mesh)
-    return R-sqrt(R**2-x[0]**2)+u[1]
+    # return R-sqrt(R**2-x[0]**2) + u[1] # Exact representation
+    return x[1] + u[1]
 
 # Stored strain energy density (linear elasticity model)
 psi = inner(sigma(u), epsilon(u))
@@ -140,9 +141,9 @@ problem = ElasticityEquation(F, u, bc)
 # Set up the non-linear problem and parametres of iterative "newton_solver"
 solver = NewtonSolver(MPI.comm_world)
 
-solver.rtol = 1e-6
+solver.rtol = 1e-12
 solver.convergence_criterion = "incremental"
-solver.max_it = 25
+solver.max_it = 50
 solver.solve(problem, u.vector)
 
 
