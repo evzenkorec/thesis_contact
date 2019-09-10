@@ -21,24 +21,32 @@ from dolfin.log import set_log_level, LogLevel
 # FEM imports
 from dolfin.fem import (assemble_matrix, assemble_scalar, assemble_vector,
                         apply_lifting, Form, set_bc)
+from dolfin.cpp.mesh import Ordering
 from petsc4py import PETSc
 
 
 # Generate mesh 
 R = 1
+L = 2
+# 3D mesh
+#mesh = generate_cylinder(R,L,res=0.04)
+# 2D mesh
 mesh = generate_half_circle(R, res=0.01)
 
 # Define function space and relevant functions
-V = VectorFunctionSpace(mesh, ("Lagrange", 1))
+degree = 1
+# if degree > 1 :
+#     Ordering.order_simplex(mesh)
+V = VectorFunctionSpace(mesh, ("Lagrange", degree))
 u, v  = Function(V), TestFunction(V)             # Trial and test function
 
 d = u.geometric_dimension()            # Space dimension of u (2 in our case)
-B  = Constant(mesh, [0.0, 0.0])        # Body force per unit volume
-T0 =  Constant(mesh, [0.0, 0.0])       # Traction force on the "line" part of the semi-circle
-T1 =  Constant(mesh, [0.0, 0.0])       # Traction force on the rest of the semi-circle
+B  = Constant(mesh, [0.0,]*d)        # Body force per unit volume
+T0 =  Constant(mesh, [0.0,]*d)       # Traction force on the "line" part of the semi-circle
+T1 =  Constant(mesh, [0.0,]*d)       # Traction force on the rest of the semi-circle
 
 # Displacement of top of semi-circle towards the rigid surface [mm]
-penetration = R/50
+penetration = R/100
 
 # FEniCS tolerance
 tol = 1e-14 
@@ -48,16 +56,16 @@ boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0)
 
 # Definition of Dirichlet type boundary - the line part of the semi-circle
 def boundary_D(x, only_boundary):
-    return x[:, 1] > R - tol
-
+    return x[:, d-1] > R - tol
 # Boundary with traction force T1 - see the description of T1
 def bn1(x):
-    return np.logical_and(x[:,1] < R-tol,x[:,1] > penetration + tol)
+    return np.logical_and(x[:,d-1] < R-tol,x[:,d-1] > penetration + tol)
+
 boundary_markers.mark(bn1, 1)
 
 # Contact search - contact part of the boundary
 def bC1(x):
-    return x[:,1] < penetration - tol
+        return x[:,d-1] < penetration - tol
 boundary_markers.mark(bC1, 2)
 
 
@@ -75,7 +83,7 @@ def project(value, V):
     return uh
 
 # Create Dirichlet-condition for penetration
-dirichlet_value = project(Constant(mesh, (0.0,-penetration)),V)
+dirichlet_value = project(Constant(mesh, [0.0,]*(d-1)+[-penetration,]),V)
 bc = DirichletBC(V, dirichlet_value , boundary_D)
 
 
@@ -113,7 +121,9 @@ class Bounds:
     def eval(self, values, x):
         values[:, 0] = self.x_lim - x[:, 0]
         values[:, 1] = self.y_lim - x[:, 1]
-
+        if d ==3:
+            values[:, 1] = self.x_lim-x[:,1]
+            values[:, 2] = self.y_lim-x[:,2]
 
 constraint_l = Bounds(-np.infty, 0)
 constraint_u = Bounds(np.infty, np.infty)
@@ -186,25 +196,28 @@ with XDMFFile(mesh.mpi_comm(), "output/u.xdmf") as file:
 #von Mises stresses
 s = sigma(u) - (1./3)*tr(sigma(u))*Identity(d) # deviatoric stress
 von_Mises = sqrt(3./2*inner(s, s))
-V0 = FunctionSpace(mesh, ("CG", 1)) # Define function space for post-processing
+V0 = FunctionSpace(mesh, ("DG", degree-1)) # Define function space for post-processing
 von_Mises = project(von_Mises, V0)
 with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
     file.write(von_Mises)
 
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
-
-p = project(-sigma(u)[1, 1], V0)
+p = project(-sigma(u)[d-1, d-1], V0)
 a = np.sqrt(R*penetration)
 Es = E.value/(1-nu.value**2)
+F_p = assemble_scalar(p*ds(2))
+if d == 2:
+    F_p *= L
+    
+with XDMFFile(mesh.mpi_comm(), "output/von_mises.xdmf") as file:
+    file.write(von_Mises)
+with XDMFFile(mesh.mpi_comm(), "output/p.xdmf") as file:
+    file.write(p)
 
-# NOTE: Should scale with L, what is L in our case?
-F = np.pi/4*Es*penetration
+
+F = np.pi/4*Es*penetration*L
 p0 = Es*penetration/(2*a)
 
 
-
 print("Maximum pressure FE: {0:8.3e} kPa Hertz: {1:8.3e} kPa".format(1e-3*max(np.abs(p.vector.array)), 1e-3*p0))
-print("Applied force    FE: {0:8.3e} kN Hertz: {1:8.3e} kN".format(1e-3*assemble_scalar(p*ds(2)), 1e-3*F))
-
-
-
+print("Applied force    FE: {0:8.3e} kN Hertz: {1:8.3e} kN".format(1e-3*F_p, 1e-3*F))
