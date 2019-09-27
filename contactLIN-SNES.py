@@ -1,9 +1,9 @@
 """This program solves contact problem of linear elastic semi-circle
- which is in contact with rigid plane using SNES solver for variational 
+ which is in contact with rigid plane using SNES solver for variational
  inequalities.
- Semi-circle initially "lies" on the rigid surface such that "minimum distance" 
- between semi-circle and  rigid plane is zero. Contact is enforced by Dirichlet 
- type boundary  condition on the "line" part of the semi-circle, which moves 
+ Semi-circle initially "lies" on the rigid surface such that "minimum distance"
+ between semi-circle and  rigid plane is zero. Contact is enforced by Dirichlet
+ type boundary  condition on the "line" part of the semi-circle, which moves
  perpendicularly towards the rigid surface a distance of "penetration"."""
 
 from dolfin import *
@@ -14,6 +14,8 @@ from create_mesh import *
 # UFL imports
 from ufl import (derivative, dot, dx, grad, Identity, inner, Measure, sym, tr, sqrt)
 
+from dolfin.geometry import BoundingBoxTree
+from dolfin import geometry
 # IO imports
 from dolfin.io import XDMFFile
 # Logging imports
@@ -25,13 +27,28 @@ from dolfin.cpp.mesh import Ordering
 from petsc4py import PETSc
 
 
-# Generate mesh 
+# Generate mesh
 R = 1
 L = 2
 # 3D mesh
 #mesh = generate_cylinder(R,L,res=0.04)
 # 2D mesh
 mesh = generate_half_circle(R, res=0.01)
+
+# Displacement of top of semi-circle towards the rigid surface [mm]
+penetration = R/15
+
+# Plane moved upwards to find collision points
+plane = RectangleMesh(MPI.comm_world,
+                      [np.array([-1.1,-0.5,0]),
+                       np.array([1.2,penetration,0])],
+                      [1,1], cpp.mesh.CellType.quadrilateral,
+                      cpp.mesh.GhostMode.none)
+
+# Read mesh function
+with XDMFFile(MPI.comm_world, "mf.xdmf") as infile:
+    mvc = infile.read_mvc_size_t(mesh, "name_to_read")
+mf = cpp.mesh.MeshFunctionSizet(mesh, mvc, 0)
 
 # Define function space and relevant functions
 degree = 1
@@ -45,29 +62,34 @@ B  = Constant(mesh, [0.0,]*d)        # Body force per unit volume
 T0 =  Constant(mesh, [0.0,]*d)       # Traction force on the "line" part of the semi-circle
 T1 =  Constant(mesh, [0.0,]*d)       # Traction force on the rest of the semi-circle
 
-# Displacement of top of semi-circle towards the rigid surface [mm]
-penetration = R/100
 
 # FEniCS tolerance
-tol = 1e-14 
+tol = 1e-14
 
-# Definition for marking boundaries
-boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0) 
+def find_contact():
+    """
+    Return a list of 1/0 for the edges of the mesh.
+       if edge is in contact with plane y=penetration and on boundary
+         return 1
+       else
+         return 0
+    """
+    boundary_markers = MeshFunction("size_t", mesh, mesh.topology.dim - 1, 0)
+    on_boundary = mesh.topology.on_boundary(1)
 
-# Definition of Dirichlet type boundary - the line part of the semi-circle
-def boundary_D(x, only_boundary):
-    return x[:, d-1] > R - tol
-# Boundary with traction force T1 - see the description of T1
-def bn1(x):
-    return np.logical_and(x[:,d-1] < R-tol,x[:,d-1] > penetration + tol)
+    tree_mesh = BoundingBoxTree(mesh, 2)
+    tree_plane = BoundingBoxTree(plane, 2)
+    ent_mesh, ent_plane = geometry.compute_collisions_bb(tree_mesh, tree_plane)
+    coll_cells = set(ent_mesh)
+    mesh.create_connectivity(2, 1)
+    c21 = mesh.topology.connectivity(2,1)
+    edges = []
+    for cell in coll_cells:
+        edges = np.append(edges, c21.connections(cell))
+    edges = set(edges)
 
-boundary_markers.mark(bn1, 1)
-
-# Contact search - contact part of the boundary
-def bC1(x):
-        return x[:,d-1] < penetration - tol
-boundary_markers.mark(bC1, 2)
-
+    bnd_edges = [i in edges and on_boundary[i] for i in range(len(on_boundary))]
+    return np.array(bnd_edges).astype(np.uint64)
 
 def project(value, V):
     """
@@ -82,10 +104,23 @@ def project(value, V):
     solve(lhs==rhs, uh)
     return uh
 
+bnd_edges = find_contact()
+mf.values[:] += bnd_edges
+
+# Output plane to file (at its actual position)
+plane.geometry.points[:,1] -= penetration
+XDMFFile(MPI.comm_world, "snes/plane.xdmf").write(plane)
+
+# Todo; Add filter on MeshFunction to return indices of facets with given value
+dir_facets = []
+for i in range(len(mf.values)):
+    if np.isclose(mf.values[i], 1):
+        dir_facets.append(i)
+
 # Create Dirichlet-condition for penetration
 dirichlet_value = project(Constant(mesh, [0.0,]*(d-1)+[-penetration,]),V)
-bc = DirichletBC(V, dirichlet_value , boundary_D)
-
+bc = DirichletBC(V, dirichlet_value , dir_facets)
+XDMFFile(MPI.comm_world, "snes/mf.xdmf").write(mf)
 
 # Elasticity parameters
 E = Constant(mesh,200000.)   # Young's modulus [MPa]
@@ -101,7 +136,7 @@ def sigma(u): # Definition of Cauchy stress tensor
 
 
 # Total potential energy
-ds = Measure('ds', domain=mesh, subdomain_data=boundary_markers)
+ds = Measure('ds', domain=mesh, subdomain_data=mf)
 psi = inner(sigma(u), epsilon(u)) # Stored strain energy density (linear elasticity model)
 Pi = psi*dx - dot(B, u)*dx - dot(T0, u)*ds(0) - dot(T1, u)*ds(1)
 
@@ -206,7 +241,7 @@ Es = E.value/(1-nu.value**2)
 F_p = assemble_scalar(p*ds(2))
 if d == 2:
     F_p *= L
-    
+
 with XDMFFile(mesh.mpi_comm(), "snes/von_mises.xdmf") as file:
     file.write(von_Mises)
 with XDMFFile(mesh.mpi_comm(), "snes/p.xdmf") as file:

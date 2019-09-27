@@ -1,6 +1,6 @@
 from pygmsh.built_in import Geometry
 from pygmsh.opencascade import Geometry as geooc
-
+import meshio
 from pygmsh import generate_mesh
 
 __all__ = ["generate_half_circle", "generate_cylinder"]
@@ -16,11 +16,20 @@ def generate_half_circle(R, res=1):
     curve2 = geo.add_circle_arc(p3, center, p2)
     loop = geo.add_line_loop([l1, -curve1, -curve2])
     surf = geo.add_plane_surface(loop)
-    geo.add_physical(surf, label="1")
+    geo.add_physical(surf, label=33)
+    geo.add_physical(l1, label=1)
+    geo.add_physical([curve2,curve1], label=2)
 
-    gmesh = generate_mesh(geo, prune_z_0=True)#, geo_filename="test.geo")
+
+    gmesh = generate_mesh(geo, prune_z_0=True, geo_filename="test.geo")
+    # Write mesh function
+    meshio.write("mf.xdmf", meshio.Mesh(points=gmesh.points,
+                                        cells={"line": gmesh.cells["line"]},
+                                        cell_data={"line":
+                                                   {"name_to_read":
+                                                    gmesh.cell_data["line"]["gmsh:physical"]}}))
+
     points, cells = gmesh.points, gmesh.cells
-    
     from dolfin import Mesh, MPI, cpp
     from dolfin.fem import create_coordinate_map
     from dolfin.cpp.mesh import CellType
@@ -53,7 +62,7 @@ def generate_cylinder(R, L, res):
 
     gmesh = generate_mesh(geo)
     points, cells = gmesh.points, gmesh.cells
-    
+
     from dolfin import Mesh, MPI, cpp
     from dolfin.fem import create_coordinate_map
     from dolfin.cpp.mesh import CellType
@@ -62,3 +71,7 @@ def generate_cylinder(R, L, res):
     cmap = create_coordinate_map(mesh.ufl_domain())
     mesh.geometry.coord_mapping = cmap
     return mesh
+
+
+if __name__ == "__main__":
+    generate_half_circle(1, res=0.5)
