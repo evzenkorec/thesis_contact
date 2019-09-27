@@ -234,6 +234,8 @@ von_Mises = project(von_Mises, V0)
 with XDMFFile(mesh.mpi_comm(), "snes/von_mises.xdmf") as file:
     file.write(von_Mises)
 
+# FIXME Add correct solution
+
 # Comparison of Maximum pressure [kPa] and applied force [kN] of FEM solution with analytical Herz solution
 p = project(-sigma(u)[d-1, d-1], V0)
 a = np.sqrt(R*penetration)
